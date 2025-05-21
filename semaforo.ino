@@ -1,152 +1,132 @@
-SemaphoreHandle_t mySemaphore;  // Declaramos el semáforo (mutex)
-int rojo0 = 32, amarillo0 = 13, verde0 = 12;
+#include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 
-void setup() {
-  Serial.begin(115200);
-  
-  pinMode(rojo0,OUTPUT);
-  pinMode(amarillo0,OUTPUT);
-  pinMode(verde0,OUTPUT);
+// Configuración del sistema
+#define NUM_AVIONES 5
+#define NUM_PISTAS 3
+#define MAX_ESPERA 10
 
-  mySemaphore = xSemaphoreCreateMutex();
+// Estructura para comunicación avión-torre
+struct MensajeAterrizaje {
+  int avionId;
+  TickType_t tiempoSolicitud;
+};
 
-  xTaskCreatePinnedToCore(
-    taskSemaphore,  // Función que vamos a ejecutar
-    "Task_Core1",   // Nombre para la función (solo para debugging)
-    4096,           // Tamaño del stack
-    NULL,           // Parámetros
-    1,              // Prioridad de la tarea
-    NULL,           // No es importante
-    1               // Asignamos el núcleo 1
-  );
+// Colas y semáforos binarios
+QueueHandle_t colaSolicitudes;
+QueueHandle_t colaAutorizaciones[NUM_AVIONES];
+SemaphoreHandle_t mutexPistas[NUM_PISTAS];
 
-  xTaskCreatePinnedToCore(
-    taskSemaphore,
-    "Task_Core0",
-    4096,
-    NULL,
-    1,
-    NULL,
-    0
-  );
-}
-
-void taskSemaphore(void *parameter) {
+// Tarea Torre de Control (Core 1)
+void torreControl(void *pvParameters) {  
   while (1) {
-    int coreID = xPortGetCoreID();  // Detecta en qué core estamos
+    MensajeAterrizaje solicitud;
 
-    // Intentamos tomar el semáforo
-    if (xSemaphoreTake(mySemaphore, portMAX_DELAY) == pdTRUE) {
-      Serial.print("Core ");
-      Serial.print(coreID);
-      Serial.println(" tiene el semáforo");
+    // Esperar solicitud de aterrizaje
+    if (xQueueReceive(colaSolicitudes, &solicitud, portMAX_DELAY)) {
+      Serial.printf("Torre: Recibida solicitud de aterrizaje del Avion %d\n", solicitud.avionId);
 
-    // Simulación de un semáforo
-      if (coreID == 0) {
-        digitalWrite(rojo0,LOW);
-        digitalWrite(verde0, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        digitalWrite(verde0,LOW);
-        digitalWrite(amarillo0, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        digitalWrite(amarillo0,LOW);
-        digitalWrite(rojo0, HIGH);
+      // Buscar pista disponible
+      int pistaLibre = -1;
+      for (int i = 0; i < NUM_PISTAS; i++) {
+        if (xSemaphoreTake(mutexPistas[i], 0) == pdTRUE) {
+          pistaLibre = i;
+          break;
+        }
       }
-      else if (coreID == 1) {
-        Serial.println("Esperando...");
-	vTaskDelay(pdMS_TO_TICKS(1500));
-      }
-      xSemaphoreGive(mySemaphore);
 
-      Serial.print("Core ");
-      Serial.print(coreID);
-      Serial.println(" liberó el semáforo");
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      if (pistaLibre != -1) {
+        // Autorizar aterrizaje en pista específica
+        Serial.printf("Torre: Autorizado Avion %d para aterrizar en Pista %d\n", solicitud.avionId, pistaLibre);
+        xQueueSend(colaAutorizaciones[solicitud.avionId], &pistaLibre, portMAX_DELAY);
+      } else {
+        // Todas las pistas ocupadas, reintentar más tarde
+        Serial.printf("Torre: No hay pistas disponibles para Avion %d. Esperando...\n", solicitud.avionId);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        xQueueSend(colaSolicitudes, &solicitud, portMAX_DELAY);
+      }
     }
   }
 }
 
-void loop() {
-
-}
-
-
---------------------------------------------------------------------------Sincronizacion de Semaforos--------------------------------------------------------------------------
-SemaphoreHandle_t mySemaphore;  // Declaramos el semáforo (mutex)
-int rojo0 = 32, amarillo0 = 13, verde0 = 12;
-int rojo1 = 14, amarillo1 = 27, verde1 = 25;
-
-void setup() {
-  Serial.begin(115200);
-  
-  pinMode(rojo0,OUTPUT);
-  pinMode(amarillo0,OUTPUT);
-  pinMode(verde0,OUTPUT);
-  pinMode(rojo1,OUTPUT);
-  pinMode(amarillo1,OUTPUT);
-  pinMode(verde1,OUTPUT);
-
-  mySemaphore = xSemaphoreCreateMutex();
-
-  xTaskCreatePinnedToCore(
-    taskSemaphore,  // Función que vamos a ejecutar
-    "Task_Core1",   // Nombre para la función (solo para debugging)
-    4096,           // Tamaño del stack
-    NULL,           // Parámetros
-    1,              // Prioridad de la tarea
-    NULL,           // No es importante
-    1               // Asignamos el núcleo 1
-  );
-
-  xTaskCreatePinnedToCore(
-    taskSemaphore,
-    "Task_Core0",
-    4096,
-    NULL,
-    1,
-    NULL,
-    0
-  );
-}
-
-void taskSemaphore(void *parameter) {
+// Tarea Avión (Core 0)
+void avion(void *pvParameters) {
+  int avionId = (int)pvParameters;
   while (1) {
-    int coreID = xPortGetCoreID();  // Detecta en qué core estamos
+    // Tiempo de aproximación aleatorio (1-5 segundos)
+    int tiempoAproximacion = random(1000, 5000);
+    vTaskDelay(pdMS_TO_TICKS(tiempoAproximacion));
 
-    // Intentamos tomar el semáforo
-    if (xSemaphoreTake(mySemaphore, portMAX_DELAY) == pdTRUE) {
-      Serial.print("Core ");
-      Serial.print(coreID);
-      Serial.println(" tiene el semáforo");
+    // Solicitar permiso para aterrizar
+    MensajeAterrizaje solicitud;
+    solicitud.avionId = avionId;
+    solicitud.tiempoSolicitud = xTaskGetTickCount();
 
-    // Simulación de un semáforo para ambos cores
-      if (coreID == 0) {
-        digitalWrite(rojo0,LOW);
-        digitalWrite(verde0, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        digitalWrite(verde0,LOW);
-        digitalWrite(amarillo0, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        digitalWrite(amarillo0,LOW);
-        digitalWrite(rojo0, HIGH);
-      }
-      else if (coreID == 1) {
-        digitalWrite(rojo1,LOW);
-        digitalWrite(verde1, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        digitalWrite(verde1,LOW);
-        digitalWrite(amarillo1, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        digitalWrite(amarillo1,LOW);
-        digitalWrite(rojo1, HIGH);
-      }
-      xSemaphoreGive(mySemaphore);
+    Serial.printf("Avion %d solicita permiso para aterrizar\n", avionId);
+    xQueueSend(colaSolicitudes, &solicitud, portMAX_DELAY);
 
-      vTaskDelay(pdMS_TO_TICKS(1000));
+    // Esperar autorización
+    int pistaAsignada;
+    if (xQueueReceive(colaAutorizaciones[avionId], &pistaAsignada, pdMS_TO_TICKS(MAX_ESPERA * 1000)) == pdTRUE) {
+      Serial.printf("Avion %d comienza aterrizaje en Pista %d\n", avionId, pistaAsignada);
+
+      // Simular tiempo de aterrizaje
+      vTaskDelay(pdMS_TO_TICKS(2000));
+      Serial.printf("Avion %d ha aterrizado en Pista %d\n", avionId, pistaAsignada);
+
+      // Liberar pista
+      xSemaphoreGive(mutexPistas[pistaAsignada]);
+      Serial.printf("Avion %d ha liberado Pista %d\n", avionId, pistaAsignada);
+    } else {
+      Serial.printf("Avion %d: Tiempo de espera agotado. Reintentando...\n", avionId);
     }
   }
 }
 
-void loop() {
+void setup() {
+  Serial.begin(115200);
+  randomSeed(analogRead(0));
 
+  // Inicializar colas
+  colaSolicitudes = xQueueCreate(NUM_AVIONES, sizeof(MensajeAterrizaje));
+  for (int i = 0; i < NUM_AVIONES; i++) {
+    colaAutorizaciones[i] = xQueueCreate(1, sizeof(int));
+  }
+
+  // Inicializar semáforos binarios (uno por pista)
+  for (int i = 0; i < NUM_PISTAS; i++) {
+    mutexPistas[i] = xSemaphoreCreateBinary();  // ← Binario, no mutex
+    xSemaphoreGive(mutexPistas[i]);             // ← Marcar como disponible
+  }
+
+  // Crear tareas Aviones (Core 0)
+  for (int i = 0; i < NUM_AVIONES; i++) {
+    xTaskCreatePinnedToCore(
+      avion,           // Función de la tarea
+      "Avion",         // Nombre
+      4096,            // Tamaño de pila
+      (void*)i,        // Parámetro
+      2,               // Prioridad
+      NULL,            // Handle
+      0                // Core 0
+    );
+  }
+
+  // Crear tarea Torre de Control (Core 1)
+  xTaskCreatePinnedToCore(
+    torreControl,      // Función de la tarea
+    "TorreControl",    // Nombre
+    4096,              // Tamaño de pila
+    NULL,              // Parámetro
+    3,                 // Prioridad mayor
+    NULL,              // Handle
+    1                  // Core 1
+  );
+}
+
+void loop() {
+  // No se usa, todo está en FreeRTOS
 }
