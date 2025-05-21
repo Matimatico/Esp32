@@ -1,89 +1,135 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <time.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "esp_system.h"
-#include "esp_log.h"
+#include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 
+// Configuración del sistema
 #define NUM_AVIONES 5
 #define NUM_PISTAS 3
+#define MAX_ESPERA 10
 
-// Estructura para solicitudes de aterrizaje
-struct {
-    int avion_id;
-    SemaphoreHandle_t permiso;
-} SolicitudAterrizaje;
+// Estructura para comunicación avión-torre
+struct MensajeAterrizaje {
+  int avionId;
+  TickType_t tiempoSolicitud;
+};
 
-SemaphoreHandle_t pistas_mutex[NUM_PISTAS];
-QueueHandle_t cola_solicitudes;
+// Colas y mutex
+QueueHandle_t colaSolicitudes;
+QueueHandle_t colaAutorizaciones[NUM_AVIONES];
+SemaphoreHandle_t mutexPistas[NUM_PISTAS];
 
-static const char *TAG = "Aeropuerto";
-
-// ---------------------------- Tarea de los aviones ----------------------------
-void avion_task(void *params) {
-    int id = (int)(intptr_t)params;
-    SemaphoreHandle_t semaforo_permiso = xSemaphoreCreateBinary();
-
-    while (1) {
-        int tiempo_aproximacion = 1000 + esp_random() % 2000;
-        vTaskDelay(pdMS_TO_TICKS(tiempo_aproximacion));
-
-        ESP_LOGI(TAG, "Avión %d solicita aterrizar", id);
-
-        SolicitudAterrizaje solicitud = {
-        .avion_id = id,
-        .permiso = semaforo_permiso
-        };
-        xQueueSend(cola_solicitudes, &solicitud, portMAX_DELAY);
-
-        // Esperar permiso de la torre
-        xSemaphoreTake(semaforo_permiso, portMAX_DELAY);
-        ESP_LOGI(TAG, "Avión %d recibió permiso de torre de control", id);
-
-        // Buscar pista libre
-        for (int i = 0; i < NUM_PISTAS; ++i) {
-            if (xSemaphoreTake(pistas_mutex[i], portMAX_DELAY)) {
-                ESP_LOGI(TAG, "Avión %d aterrizando en pista %d", id, i);
-                int tiempo_aterrizaje = 2000 + esp_random() % 2000;
-                vTaskDelay(pdMS_TO_TICKS(tiempo_aterrizaje));
-                ESP_LOGI(TAG, "Avión %d libera pista %d", id, i);
-                xSemaphoreGive(pistas_mutex[i]);
-                break;
-            }
+// Tarea Torre de Control (Core 1)
+void torreControl(void *pvParameters) {
+  Serial.println("Torre de control iniciada");
+  
+  while(1) {
+    MensajeAterrizaje solicitud;
+    
+    // Esperar solicitud de aterrizaje
+    if(xQueueReceive(colaSolicitudes, &solicitud, portMAX_DELAY)) {
+      Serial.printf("Torre: Recibida solicitud de aterrizaje del Avion %d\n", solicitud.avionId);
+      
+      // Buscar pista disponible
+      int pistaLibre = -1;
+      for(int i = 0; i < NUM_PISTAS; i++) {
+        if(xSemaphoreTake(mutexPistas[i], 0) == pdTRUE) {
+          pistaLibre = i;
+          break;
         }
+      }
+      
+      if(pistaLibre != -1) {
+        // Autorizar aterrizaje en pista específica
+        Serial.printf("Torre: Autorizado Avion %d para aterrizar en Pista %d\n", solicitud.avionId, pistaLibre);
+        xQueueSend(colaAutorizaciones[solicitud.avionId], &pistaLibre, portMAX_DELAY);
+      } else {
+        // Todas las pistas ocupadas, reintentar más tarde
+        Serial.printf("Torre: No hay pistas disponibles para Avion %d. Esperando...\n", solicitud.avionId);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        xQueueSend(colaSolicitudes, &solicitud, portMAX_DELAY);
+      }
     }
+  }
 }
 
-// ---------------------------- Torre de control ----------------------------
-void torre_control_task(void *params) {
-    SolicitudAterrizaje solicitud;
-
-    while (1) {
-        if (xQueueReceive(cola_solicitudes, &solicitud, portMAX_DELAY)) {
-            ESP_LOGI(TAG, "Torre autoriza aterrizaje a avión %d", solicitud.avion_id);
-            xSemaphoreGive(solicitud.permiso);
-        }
+// Tarea Avión (Core 0)
+void avion(void *pvParameters) {
+  int avionId = (int)pvParameters;
+  Serial.printf("Avion %d iniciado\n", avionId);
+  
+  while(1) {
+    // Tiempo de aproximación aleatorio (1-5 segundos)
+    int tiempoAproximacion = random(1000, 5000);
+    vTaskDelay(pdMS_TO_TICKS(tiempoAproximacion));
+    
+    // Solicitar permiso para aterrizar
+    MensajeAterrizaje solicitud;
+    solicitud.avionId = avionId;
+    solicitud.tiempoSolicitud = xTaskGetTickCount();
+    
+    Serial.printf("Avion %d solicita permiso para aterrizar\n", avionId);
+    xQueueSend(colaSolicitudes, &solicitud, portMAX_DELAY);
+    
+    // Esperar autorización
+    int pistaAsignada;
+    if(xQueueReceive(colaAutorizaciones[avionId], &pistaAsignada, pdMS_TO_TICKS(MAX_ESPERA * 1000)) == pdTRUE) {
+      Serial.printf("Avion %d comienza aterrizaje en Pista %d\n", avionId, pistaAsignada);
+      
+      // Tiempo de aterrizaje aleatorio (2-6 segundos)
+      int tiempoAterrizaje = random(2000, 6000);
+      vTaskDelay(pdMS_TO_TICKS(tiempoAterrizaje));
+      
+      // Liberar pista
+      xSemaphoreGive(mutexPistas[pistaAsignada]);
+      Serial.printf("Avion %d ha liberado Pista %d\n", avionId, pistaAsignada);
+    } else {
+      Serial.printf("Avion %d: Tiempo de espera agotado. Reintentando...\n", avionId);
     }
+  }
 }
 
-// ---------------------------- Configuración inicial ----------------------------
-void app_main(void) {
-    // Inicialización
-    cola_solicitudes = xQueueCreate(10, sizeof(SolicitudAterrizaje));
-    for (int i = 0; i < NUM_PISTAS; ++i) {
-        pistas_mutex[i] = xSemaphoreCreateMutex();
-    }
+void setup() {
+  Serial.begin(115200);
+  randomSeed(analogRead(0));
+  
+  // Inicializar colas y semáforos
+  colaSolicitudes = xQueueCreate(NUM_AVIONES, sizeof(MensajeAterrizaje));
+  
+  for(int i = 0; i < NUM_AVIONES; i++) {
+    colaAutorizaciones[i] = xQueueCreate(1, sizeof(int));
+  }
+  
+  for(int i = 0; i < NUM_PISTAS; i++) {
+    mutexPistas[i] = xSemaphoreCreateMutex();
+    xSemaphoreGive(mutexPistas[i]); // Inicialmente libres
+  }
+  
+  // Crear tareas
+  for(int i = 0; i < NUM_AVIONES; i++) {
+    xTaskCreatePinnedToCore(
+      avion,           // Función de la tarea
+      "Avion",         // Nombre
+      4096,            // Tamaño de pila
+      (void*)i,        // Parámetro
+      2,               // Prioridad
+      NULL,            // Handle
+      0                // Core 0
+    );
+  }
+  
+  xTaskCreatePinnedToCore(
+    torreControl,      // Función de la tarea
+    "TorreControl",    // Nombre
+    4096,              // Tamaño de pila
+    NULL,              // Parámetro
+    3,                 // Prioridad (mayor que aviones)
+    NULL,              // Handle
+    1                  // Core 1
+  );
+}
 
-    // Crear tarea de torre en Core 1
-    xTaskCreatePinnedToCore(torre_control_task, "Torre Control", 4096, NULL, 2, NULL, 1);
-
-    // Crear tareas de aviones en Core 0
-    for (int i = 0; i < NUM_AVIONES; ++i) {
-        char nombre[16];
-        snprintf(nombre, sizeof(nombre), "Avion %d", i);
-        xTaskCreatePinnedToCore(avion_task, nombre, 4096, (void*)(intptr_t)i, 1, NULL, 0);
-    }
+void loop() {
+  // Nada aquí, todo se maneja con FreeRTOS
 }
