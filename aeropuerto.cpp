@@ -20,7 +20,7 @@ QueueHandle_t colaAutorizaciones[NUM_AVIONES];
 SemaphoreHandle_t mutexPistas[NUM_PISTAS];
 
 // Tarea Torre de Control (Core 1)
-void torreControl(void *parameter) {
+void torreControl(void *pvParameters) {
   Serial.println("Torre de control iniciada");
   
   while(1) {
