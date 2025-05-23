@@ -7,7 +7,6 @@
 // Configuración del sistema
 #define NUM_AVIONES 5
 #define NUM_PISTAS 3
-#define MAX_ESPERA 10
 
 // Estructura para comunicación avión-torre
 struct MensajeAterrizaje {
@@ -21,7 +20,7 @@ QueueHandle_t colaAutorizaciones[NUM_AVIONES];
 SemaphoreHandle_t mutexPistas[NUM_PISTAS];
 
 // Tarea Torre de Control (Core 1)
-void torreControl(void *pvParameters) {
+void torreControl(void *parameter) {
   Serial.println("Torre de control iniciada");
   
   while(1) {
@@ -74,7 +73,7 @@ void avion(void *pvParameters) {
     
     // Esperar autorización
     int pistaAsignada;
-    if(xQueueReceive(colaAutorizaciones[avionId], &pistaAsignada, pdMS_TO_TICKS(MAX_ESPERA * 1000)) == pdTRUE) {
+    if(xQueueReceive(colaAutorizaciones[avionId], &pistaAsignada, portMAX_DELAY) == pdTRUE) {
       Serial.printf("Avion %d comienza aterrizaje en Pista %d\n", avionId, pistaAsignada);
       
       // Tiempo de aterrizaje aleatorio (2-6 segundos)
@@ -84,8 +83,7 @@ void avion(void *pvParameters) {
       // Liberar pista
       xSemaphoreGive(mutexPistas[pistaAsignada]);
       Serial.printf("Avion %d ha liberado Pista %d\n", avionId, pistaAsignada);
-    } else {
-      Serial.printf("Avion %d: Tiempo de espera agotado. Reintentando...\n", avionId);
+    }
     }
   }
 }
